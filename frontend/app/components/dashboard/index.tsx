@@ -13,6 +13,30 @@ import {
   FaListCheck 
 } from "react-icons/fa6";
 
+const getBadgeColor = (source: string) => {
+  switch (source) {
+    case "sysco_catalog": return "bg-emerald-100 text-emerald-800 border-emerald-200";
+    case "estimated": return "bg-amber-100 text-amber-800 border-amber-200";
+    default: return "bg-red-100 text-red-800 border-red-200";
+  }
+};
+
+const DEFAULT_MENU = {
+  "event": "Tech Challenge Demo",
+  "items": [
+    {
+      "name": "Bacon-Wrapped Scallops",
+      "description": "Pan-seared diver scallops wrapped in applewood-smoked bacon",
+      "category": "appetizers"
+    },
+    {
+      "name": "Wagyu Beef Tartare",
+      "description": "A5 Wagyu beef, quail egg, capers, truffle oil, crostini",
+      "category": "appetizers"
+    }
+  ]
+};
+
 interface Ingredient {
   name: string;
   quantity: string;
@@ -35,22 +59,6 @@ interface JobStatus {
   learnings: string;
   latest_items: LineItem[];
 }
-
-const DEFAULT_MENU = {
-  "event": "Tech Challenge Demo",
-  "items": [
-    {
-      "name": "Bacon-Wrapped Scallops",
-      "description": "Pan-seared diver scallops wrapped in applewood-smoked bacon",
-      "category": "appetizers"
-    },
-    {
-      "name": "Wagyu Beef Tartare",
-      "description": "A5 Wagyu beef, quail egg, capers, truffle oil, crostini",
-      "category": "appetizers"
-    }
-  ]
-};
 
 export default function Dashboard() {
   const [jsonInput, setJsonInput] = useState(JSON.stringify(DEFAULT_MENU, null, 2));
@@ -86,14 +94,6 @@ export default function Dashboard() {
 
   const isProcessing = statusData?.status === "in_progress" || mutation.isPending;
 
-  const getBadgeColor = (source: string) => {
-    switch (source) {
-      case "sysco_catalog": return "bg-emerald-100 text-emerald-800 border-emerald-200";
-      case "estimated": return "bg-amber-100 text-amber-800 border-amber-200";
-      default: return "bg-red-100 text-red-800 border-red-200";
-    }
-  };
-
   return (
     <div className="min-h-screen font-sans p-6 max-w-7xl mx-auto">
       
@@ -109,9 +109,15 @@ export default function Dashboard() {
         </div>
         
         <div className="flex items-center gap-3 bg-white px-4 py-2 rounded-full border border-slate-200 shadow-sm">
-          <div className={`w-3 h-3 rounded-full ${isProcessing ? 'bg-green-500 animate-pulse' : 'bg-slate-300'}`} />
+          <div className={`w-3 h-3 rounded-full ${
+            isProcessing ? 'bg-green-500 animate-pulse' : 
+            isStatusLoading ? 'bg-blue-400 animate-bounce' :
+            'bg-slate-400'
+          }`} />
           <span className="text-sm font-semibold text-slate-600">
-            {isProcessing ? "AGENT WORKING..." : "SYSTEM READY"}
+            {isProcessing ? "AGENT WORKING..." : 
+            isStatusLoading ? "CONNECTING..." :
+            "SYSTEM READY"}
           </span>
         </div>
       </header>

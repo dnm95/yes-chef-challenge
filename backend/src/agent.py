@@ -24,12 +24,11 @@ class ChefAgent:
         Estimates the cost for a single menu item using RAG (Retrieval Augmented Generation).
         """
         
-        # --- FIX: Inject the Pydantic Schema directly into the prompt ---
-        # This prevents the LLM from hallucinating keys like 'ingredient' instead of 'name'
+        # Inject the Pydantic Schema directly into the prompt to ensure JSON compliance
         schema_structure = json.dumps(LineItem.model_json_schema(), indent=2)
 
         system_prompt = f"""
-        You are an expert Catering Estimator for 'Elegant Foods'.
+        You are an expert Catering Estimator for 'Elegant Foods' (US West Coast).
         
         GLOBAL CONTEXT (Learnings from previous batches):
         {learnings}
@@ -37,20 +36,25 @@ class ChefAgent:
         YOUR MISSION:
         1. Analyze the dish description.
         2. Break it down into specific ingredients.
-        3. USE THE 'search_catalog' TOOL to find real pricing. 
-           - Do not guess prices if you can search.
-           - If the catalog returns a case price (e.g., $30 for 6 cans), calculate the unit cost for the portion.
+        3. USE THE 'search_catalog' TOOL to find real pricing in Sysco.
+        
+        PRICING STRATEGY (CRITICAL):
+        - PRIORITY 1: Sysco Catalog. If found, calculate unit cost from case price. Source = "sysco_catalog".
+        - PRIORITY 2: Market Estimate. If NOT found in Sysco (e.g. Wagyu, Truffles, Specialty items), you MUST ESTIMATE the cost based on average US food service prices. Source = "estimated".
+        - PRIORITY 3: Not Available. Only use this if the item is impossible to price (e.g. "Love"). Source = "not_available".
+        
+        Do NOT return $0.00 or null unless absolutely necessary. The goal is to get a rough quote.
         
         CRITICAL OUTPUT RULES (STRICT JSON COMPLIANCE):
         - You MUST output a JSON object that strictly matches this schema:
         {schema_structure}
         
         - 'item_name': Must match the input menu name exactly.
-        - 'unit_cost': Must be a NUMBER (float) or null. NEVER output a string like "not_available" or "$5.00".
+        - 'unit_cost': Must be a NUMBER (float). Example: 5.50.
         - 'source': Must be exactly one of ["sysco_catalog", "estimated", "not_available"].
         """
 
-        # Tool Definition (OpenAI Function Calling)
+        # Tool Definition
         tools = [{
             "type": "function",
             "function": {
@@ -99,15 +103,13 @@ class ChefAgent:
                     })
 
             # --- Step 3: Final JSON Generation ---
-            # We enforce JSON mode again to ensure the schema injection works
             final_response = await self.client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-4.1",
                 messages=messages,
                 response_format={"type": "json_object"}
             )
             raw_json = final_response.choices[0].message.content
             
-            # Debugging: Print raw JSON if validation fails (helps troubleshooting)
             try:
                 return LineItem.model_validate_json(raw_json)
             except Exception as e:
@@ -120,7 +122,6 @@ class ChefAgent:
             return LineItem.model_validate_json(msg.content)
         except Exception as e:
              print(f"❌ JSON Validation Failed (No Tools) for {menu_item.get('name')}")
-             print(f"Raw Output: {msg.content}")
              raise e
 
     async def compact_context(self, batch_results: list) -> str:
