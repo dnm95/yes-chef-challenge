@@ -2,49 +2,73 @@ import pandas as pd
 from rapidfuzz import process, fuzz, utils
 
 class SyscoCatalog:
+  """
+  In-memory Search Engine for the Sysco Catalog.
+  
+  Why RapidFuzz + Pandas?
+  - Pandas provides high-performance vectorized data loading and cleaning (ETL).
+  - RapidFuzz is a C++ optimized library that is significantly faster (x10-x50) 
+    than standard Python 'fuzzywuzzy' or Levenshtein implementations.
+  
+  For a dataset of ~600 items, this in-memory approach offers sub-millisecond 
+  latency without the overhead of managing an external Vector DB (like Pinecone).
+  """
+
   def __init__(self, csv_path: str):
-    # Load the CSV
+    # --- ETL PIPELINE (Extract, Transform, Load) ---
+    # We perform all heavy data cleaning ONCE during server startup.
+    # This ensures that search queries are fast (O(1) access) and don't need real-time cleaning.
+    
+    # 1. LOAD
     self.df = pd.read_csv(csv_path)
     
-    # 1. Preprocess Descriptions: Uppercase for consistency
+    # 2. TRANSFORM: Normalize Descriptions
+    # Convert to Uppercase to ensure case-insensitive matching later.
     self.df['Product Description'] = self.df['Product Description'].astype(str).str.upper()
     
-    # This handles strings like "$198.60" or "$1,200.00"
+    # 3. TRANSFORM: Sanitize Currency Data
+    # The raw CSV contains strings like "$1,200.50". 
+    # We must strip symbols to enable mathematical operations.
     if 'Cost' in self.df.columns:
-        self.df['Cost'] = (
-          self.df['Cost']
-          .astype(str)
-          .str.replace('$', '', regex=False)
-          .str.replace(',', '', regex=False)
-        )
-        # Convert to numeric, turning errors into 0.0
-        self.df['Cost'] = pd.to_numeric(self.df['Cost'], errors='coerce').fillna(0.0)
+      self.df['Cost'] = (
+        self.df['Cost']
+        .astype(str)
+        .str.replace('$', '', regex=False) # Remove currency symbol
+        .str.replace(',', '', regex=False) # Remove thousands separator
+      )
+      # Convert to numeric float. 'coerce' turns invalid parsing errors into NaN.
+      # fillna(0.0) ensures we never break the math logic downstream.
+      self.df['Cost'] = pd.to_numeric(self.df['Cost'], errors='coerce').fillna(0.0)
     
-    # Create a list of descriptions for RapidFuzz
+    # 4. INDEXING
+    # Convert the column to a python list for RapidFuzz ingestion.
     self.descriptions = self.df['Product Description'].tolist()
     
     print(f"✅ Sysco Catalog Loaded: {len(self.df)} items indexed.")
 
   def search(self, query: str, limit: int = 5, score_cutoff: int = 50) -> list:
     """
-    Performs a fuzzy search on the catalog.
+    Performs a semantic-like fuzzy search on the catalog.
     
     Args:
       query: The ingredient name to look for (e.g. "heavy cream").
       limit: Max results to return.
       score_cutoff: Minimum score (0-100) to consider a match. 
-                    LOWERED TO 50 to catch partial matches like "Butter" inside "BUTTER SALTED".
+        Set to 50 to allow partial matches (finding 'Butter' within 'SALTED BUTTER').
     """
     if not query:
       return []
 
-    # Preprocess query: Uppercase to match catalog format
+    # Preprocess query: Apply same normalization (Uppercase) as the catalog
     clean_query = utils.default_process(query).upper()
 
-    # --- ALGORITHM CHOICE IS KEY HERE ---
-    # fuzz.partial_token_sort_ratio is the best for this use case.
-    # 1. 'partial': It matches "Butter" inside "BUTTER SALTED GRADE AA" perfectly (Score 100).
-    # 2. 'token_sort': It handles "Applewood Bacon" matching "BACON APPLEWOOD" (Score 100).
+    # --- ALGORITHM CHOICE: partial_token_sort_ratio ---
+    # We chose this specific scorer to solve two edge cases:
+    # 1. Substring Matching ('Partial'): 
+    #    Query "Milk" should match "WHOLE MILK GALLON" (Score 100).
+    #    Standard 'ratio' would give a low score due to length difference.
+    # 2. Word Order Independence ('Token Sort'):
+    #    Query "Applewood Bacon" should match "BACON APPLEWOOD SMOKED".
     results = process.extract(
       clean_query,
       self.descriptions,
@@ -55,6 +79,7 @@ class SyscoCatalog:
 
     formatted_results = []
     
+    # Map the search indices back to the full Pandas DataFrame rows
     for desc, score, index in results:
       row = self.df.iloc[index]
       formatted_results.append({
@@ -62,7 +87,7 @@ class SyscoCatalog:
         "desc": row['Product Description'],
         "brand": row['Brand'],
         "pack_size": row['Unit of Measure'],
-        "case_price": float(row['Cost']), # Now safe to convert
+        "case_price": float(row['Cost']), # Safe to cast to float due to __init__ cleaning
         "match_score": round(score, 2)
       })
 

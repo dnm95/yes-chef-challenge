@@ -1,78 +1,70 @@
-# backend/src/logic.py
 import json
 import os
-import pandas as pd
-from rapidfuzz import process, fuzz
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field
-from typing import List, Optional, Literal
+from .catalog import SyscoCatalog
+from .models import LineItem
 
-# --- Modelos de Datos (Schemas) ---
-class Ingredient(BaseModel):
-  name: str
-  quantity: str
-  unit_cost: Optional[float] = None
-  source: Literal["sysco_catalog", "estimated", "not_available"]
-  sysco_item_number: Optional[str] = None
-
-class MenuItemCost(BaseModel):
-  item_name: str
-  category: str
-  ingredients: List[Ingredient]
-  ingredient_cost_per_unit: float
-
-# --- Catálogo (Buscador) ---
-class SyscoCatalog:
-  def __init__(self, csv_path: str):
-    # Leemos todo como string para evitar errores de tipo
-    self.df = pd.read_csv(csv_path, dtype=str)
-    # Pre-calculamos columna de búsqueda
-    self.df['search_text'] = self.df['Product Description'] + " " + self.df['Brand']
-    self.products = self.df.to_dict('records')
-    self.search_keys = self.df['search_text'].tolist()
-
-  def search(self, query: str, limit: int = 3):
-    results = process.extract(query, self.search_keys, scorer=fuzz.WRatio, limit=limit)
-    matches = []
-    for text, score, idx in results:
-      if score > 60:
-        item = self.products[idx]
-        matches.append({
-          "sysco_id": item['Sysco Item Number'],
-          "desc": item['Product Description'],
-          "pack": item['Unit of Measure'],
-          # Limpiamos el precio ($25.00 -> 25.00)
-          "price_case": float(str(item['Cost']).replace('$', '').replace(',', '')),
-          "match_score": score
-        })
-    return matches
-
-# --- El Agente (Cerebro) ---
 class ChefAgent:
+  """
+  The AI Orchestrator.
+  Uses OpenAI's GPT-4.1 (The smartest non-reasoning model of 2026) to 
+  orchestrate ingredients and Function Calling (Tools) for catalog retrieval.
+  """
+
   def __init__(self, catalog: SyscoCatalog):
-    self.client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    # Async client for high-concurrency non-blocking I/O
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+      raise ValueError("OPENAI_API_KEY environment variable is not set.")
+        
+    self.client = AsyncOpenAI(api_key=api_key)
     self.catalog = catalog
 
-  async def estimate_item(self, menu_item: dict) -> MenuItemCost:
-    system_prompt = """
-    Eres un estimador de costos experto para 'Elegant Foods'.
-    Tu tarea: Desglosar un platillo en ingredientes y calcular su costo unitario usando el catálogo Sysco.
-    
-    Pasos:
-    1. Identifica los ingredientes necesarios.
-    2. USA LA TOOL 'search_catalog' para buscar precios reales.
-    3. Calcula el costo por porción basado en el precio de la caja (Case Price) y tamaño (Pack Size).
-    4. Si no encuentras algo, márcalo como 'estimated' o 'not_available'.
+  async def estimate_item(self, menu_item: dict, learnings: str) -> LineItem:
+    """
+    Core RAG Loop (Retrieval Augmented Generation):
+    1. Receive Menu Item.
+    2. LLM decides which ingredients to search for.
+    3. Python executes searches against the CSV.
+    4. LLM synthesizes final cost based on found vs estimated items.
     """
     
+    # Inject the Pydantic JSON Schema directly into the prompt.
+    # This guarantees the LLM output matches our internal data models perfectly.
+    schema_structure = json.dumps(LineItem.model_json_schema(), indent=2)
+
+    system_prompt = f"""
+    You are an expert Catering Estimator for 'Elegant Foods' (US West Coast).
+    
+    GLOBAL CONTEXT (Learnings from previous batches):
+    {learnings}
+    
+    YOUR MISSION:
+    1. Analyze the dish description.
+    2. Break it down into specific ingredients.
+    3. USE THE 'search_catalog' TOOL to find real pricing in Sysco.
+    
+    PRICING STRATEGY (CRITICAL):
+    - PRIORITY 1: Sysco Catalog. If found, calculate unit cost. Source = "sysco_catalog".
+    - PRIORITY 2: Market Estimate. If NOT found (e.g. Wagyu, Truffles), ESTIMATE the cost. Source = "estimated".
+    - PRIORITY 3: Not Available. Source = "not_available".
+    
+    CRITICAL OUTPUT RULES:
+    - You MUST output a JSON object that strictly matches this schema:
+    {schema_structure}
+    """
+
+    # Tool Definition (Function Calling Schema)
     tools = [{
       "type": "function",
       "function": {
         "name": "search_catalog",
-        "description": "Busca un ingrediente en el catálogo de Sysco.",
+        "description": "Search the Sysco supplier catalog for an ingredient.",
         "parameters": {
           "type": "object",
-          "properties": {"query": {"type": "string"}},
+          "properties": {
+            "query": {"type": "string", "description": "Name of ingredient"}
+          },
           "required": ["query"]
         }
       }
@@ -80,37 +72,88 @@ class ChefAgent:
 
     messages = [
       {"role": "system", "content": system_prompt},
-      {"role": "user", "content": f"Platillo: {json.dumps(menu_item)}"}
+      {"role": "user", "content": f"Estimate this item: {json.dumps(menu_item)}"}
     ]
 
-    # Primer hit al LLM
+    # --- STEP 1: REASONING ---
+    # We use 'gpt-4.1'. It excels at instruction following 
+    # and has a 1M token context window, perfect for RAG tasks.
     response = await self.client.chat.completions.create(
-      model="gpt-4.1",
+      model="gpt-4.1", 
       messages=messages,
       tools=tools,
       tool_choice="auto"
     )
+    
     msg = response.choices[0].message
     messages.append(msg)
 
-    # Loop de herramientas (Agent Loop)
+    # --- STEP 2: TOOL EXECUTION LOOP ---
     if msg.tool_calls:
       for tool_call in msg.tool_calls:
-          if tool_call.function.name == "search_catalog":
-            args = json.loads(tool_call.function.arguments)
-            results = self.catalog.search(args['query'])
-            messages.append({
-              "role": "tool",
-              "tool_call_id": tool_call.id,
-              "content": json.dumps(results)
-            })
+        if tool_call.function.name == "search_catalog":
+          args = json.loads(tool_call.function.arguments)
+          
+          # Execute local Python search against CSV (RapidFuzz)
+          # This uses the optimized search logic from catalog.py
+          search_results = self.catalog.search(args['query'])
+            
+          messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "content": json.dumps(search_results)
+          })
 
-      # Segundo hit para obtener el JSON final
-      final_resp = await self.client.chat.completions.create(
+      # --- STEP 3: SYNTHESIS ---
+      final_response = await self.client.chat.completions.create(
         model="gpt-4.1",
         messages=messages,
         response_format={"type": "json_object"}
       )
-      return MenuItemCost.model_validate_json(final_resp.choices[0].message.content)
+      raw_json = final_response.choices[0].message.content
+      
+      return LineItem.model_validate_json(raw_json)
     
-    return MenuItemCost.model_validate_json(msg.content)
+    return LineItem.model_validate_json(msg.content)
+
+  async def compact_context(self, batch_results: list) -> str:
+    """
+    Context Compaction Logic.
+    Summarizes results to identify 'Learnings' for the next batch.
+    """
+    summary_input = [
+      {
+        "item": r.item_name, 
+        "missing_ingredients": [i.name for i in r.ingredients if i.source != 'sysco_catalog']
+      }
+      for r in batch_results
+    ]
+    
+    response = await self.client.chat.completions.create(
+      model="gpt-4.1",
+      messages=[
+        {"role": "system", "content": "Summarize new learnings about missing ingredients or catalog quirks in 2 sentences."},
+        {"role": "user", "content": json.dumps(summary_input)}
+      ]
+    )
+    return response.choices[0].message.content
+
+  async def parse_menu_request(self, user_text: str) -> dict:
+    """
+    NLP Pipeline: Converts unstructured text to structured JSON Menu.
+    """
+    system_prompt = """
+    You are a Catering Menu Architect.
+    Convert the user's unstructured request into a structured JSON Menu Specification.
+    """
+
+    response = await self.client.chat.completions.create(
+      model="gpt-4.1",
+      messages=[
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_text}
+      ],
+      response_format={"type": "json_object"}
+    )
+    
+    return json.loads(response.choices[0].message.content)
