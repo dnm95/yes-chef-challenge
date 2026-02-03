@@ -14,3 +14,8 @@ yarn-debug.log*
 yarn-error.log*
 .vercel
 .env.local
+
+# --- App Data (Runtime State) ---
+backend/data/job_state.json
+
+*.log

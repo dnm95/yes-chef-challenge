@@ -1,72 +1,69 @@
 import pandas as pd
-from rapidfuzz import process, fuzz
-import os
-from typing import List, Dict, Any
+from rapidfuzz import process, fuzz, utils
 
 class SyscoCatalog:
-  """
-  Handles fuzzy searching against the Sysco CSV catalog.
-  
-  Why RapidFuzz? 
-  Standard SQL/String matching fails on 'Applewood Bacon' vs 'BACON, APPLEWOOD, SMOKED'.
-  Fuzzy matching allows us to find semantically similar items with high accuracy.
-  """
-
   def __init__(self, csv_path: str):
-    if not os.path.exists(csv_path):
-      raise FileNotFoundError(f"Catalog not found at: {csv_path}")
-        
-    # Load CSV. We force dtype=str to prevent pandas from inferring types incorrectly.
-    # We fill NA values to avoid runtime errors during string concatenation.
-    self.df = pd.read_csv(csv_path, dtype=str).fillna("")
+    # Load the CSV
+    self.df = pd.read_csv(csv_path)
     
-    # Optimization: Pre-compute a 'search_text' column combining Description and Brand
-    # This increases the surface area for the fuzzy matcher.
-    self.df['search_text'] = self.df['Product Description'] + " " + self.df['Brand']
+    # 1. Preprocess Descriptions: Uppercase for consistency
+    self.df['Product Description'] = self.df['Product Description'].astype(str).str.upper()
     
-    # Convert to list of dicts for O(1) access by index after search
-    self.products = self.df.to_dict('records')
-    self.search_keys = self.df['search_text'].tolist()
-        
-    print(f"✅ Sysco Catalog Loaded: {len(self.products)} items indexed.")
+    # This handles strings like "$198.60" or "$1,200.00"
+    if 'Cost' in self.df.columns:
+        self.df['Cost'] = (
+          self.df['Cost']
+          .astype(str)
+          .str.replace('$', '', regex=False)
+          .str.replace(',', '', regex=False)
+        )
+        # Convert to numeric, turning errors into 0.0
+        self.df['Cost'] = pd.to_numeric(self.df['Cost'], errors='coerce').fillna(0.0)
+    
+    # Create a list of descriptions for RapidFuzz
+    self.descriptions = self.df['Product Description'].tolist()
+    
+    print(f"✅ Sysco Catalog Loaded: {len(self.df)} items indexed.")
 
-  def search(self, query: str, limit: int = 3, threshold: int = 60) -> List[Dict[str, Any]]:
+  def search(self, query: str, limit: int = 5, score_cutoff: int = 50) -> list:
     """
-    Performs a fuzzy search query.
+    Performs a fuzzy search on the catalog.
     
     Args:
-        query: The ingredient name to look for.
-        limit: Max results to return.
-        threshold: Minimum score (0-100) to consider a match valid.
+      query: The ingredient name to look for (e.g. "heavy cream").
+      limit: Max results to return.
+      score_cutoff: Minimum score (0-100) to consider a match. 
+                    LOWERED TO 50 to catch partial matches like "Butter" inside "BUTTER SALTED".
     """
-    # WRatio handles partial matches better than simple Ratio
-    results = process.extract(
-      query, 
-      self.search_keys, 
-      scorer=fuzz.WRatio, 
-      limit=limit
-    )
-    
-    matches = []
-    for match_tuple in results:
-      text, score, idx = match_tuple
-      
-      if score >= threshold:
-        item = self.products[idx]
-        
-        # Robust Price Parsing: Remove '$' and handle formatting
-        try:
-          price_str = str(item.get('Cost', '0')).replace('$', '').replace(',', '')
-          price = float(price_str)
-        except ValueError:
-          price = 0.0
+    if not query:
+      return []
 
-        matches.append({
-          "sysco_id": item.get('Sysco Item Number'),
-          "desc": item.get('Product Description'),
-          "pack": item.get('Unit of Measure'),
-          "price_case": price,
-          "match_score": score
-        })
-            
-    return matches
+    # Preprocess query: Uppercase to match catalog format
+    clean_query = utils.default_process(query).upper()
+
+    # --- ALGORITHM CHOICE IS KEY HERE ---
+    # fuzz.partial_token_sort_ratio is the best for this use case.
+    # 1. 'partial': It matches "Butter" inside "BUTTER SALTED GRADE AA" perfectly (Score 100).
+    # 2. 'token_sort': It handles "Applewood Bacon" matching "BACON APPLEWOOD" (Score 100).
+    results = process.extract(
+      clean_query,
+      self.descriptions,
+      scorer=fuzz.partial_token_sort_ratio,
+      limit=limit,
+      score_cutoff=score_cutoff
+    )
+
+    formatted_results = []
+    
+    for desc, score, index in results:
+      row = self.df.iloc[index]
+      formatted_results.append({
+        "sysco_id": str(row['Sysco Item Number']),
+        "desc": row['Product Description'],
+        "brand": row['Brand'],
+        "pack_size": row['Unit of Measure'],
+        "case_price": float(row['Cost']), # Now safe to convert
+        "match_score": round(score, 2)
+      })
+
+    return formatted_results
