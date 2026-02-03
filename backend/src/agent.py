@@ -144,3 +144,41 @@ class ChefAgent:
       ]
     )
     return response.choices[0].message.content
+
+
+  async def parse_menu_request(self, user_text: str) -> dict:
+    """
+    Translates natural language input into the structured menu JSON format required by the system.
+    """
+    system_prompt = """
+    You are a Catering Menu Architect.
+    Your goal is to convert unstructured user requests into a strictly structured JSON Menu Specification.
+    
+    OUTPUT FORMAT (Strict JSON):
+    {
+      "items": [
+          {
+            "name": "Dish Name",
+            "description": "Detailed description (infer ingredients if vague)",
+            "category": "appetizers" | "main_plates" | "desserts" | "cocktails"
+          }
+      ]
+    }
+    
+    RULES:
+    1. Infer details: If user says "Steak", output "Grilled Ribeye Steak with garlic butter...".
+    2. Categorize logic: Assign the correct category based on the item type.
+    3. Quantity: If the user mentions "for 50 people", ignore the count for now, just extract the menu items.
+    """
+
+    response = await self.client.chat.completions.create(
+        model="gpt-4.1",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text}
+        ],
+        response_format={"type": "json_object"}
+    )
+    
+    # Return the parsed dictionary (e.g., {"items": [...]})
+    return json.loads(response.choices[0].message.content)

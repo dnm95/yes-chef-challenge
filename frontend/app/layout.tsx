@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Chef AI",
-  description: "Chef AI",
+  title: "Yes Chef AI",
+  description: "Yes Chef AI",
 };
 
 export default function RootLayout({
