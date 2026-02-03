@@ -15,6 +15,8 @@ import {
   FaCode
 } from "react-icons/fa6";
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL!;
+
 interface Ingredient {
   name: string;
   quantity: string;
@@ -65,9 +67,9 @@ export default function Dashboard() {
       if (inputMode === "json") {
         const parsed = JSON.parse(jsonInput);
         const items = parsed.items || parsed.categories?.appetizers || [];
-        return axios.post("http://127.0.0.1:8000/api/estimate", { items, reset: true });
+        return axios.post(`${API_URL}/api/estimate`, { items, reset: true });
       } else {
-        return axios.post("http://127.0.0.1:8000/api/estimate-text", { text: chatInput, reset: true });
+        return axios.post(`${API_URL}/api/estimate-text`, { text: chatInput, reset: true });
       }
     },
     onSuccess: () => {
@@ -82,7 +84,7 @@ export default function Dashboard() {
   const { data: statusData, isLoading: isStatusLoading } = useQuery({
     queryKey: ["jobStatus"],
     queryFn: async () => {
-      const res = await axios.get<JobStatus>("http://127.0.0.1:8000/api/status");
+      const res = await axios.get<JobStatus>(`${API_URL}/api/status`);
       return res.data;
     },
     refetchInterval: (query) => {
