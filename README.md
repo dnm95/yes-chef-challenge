@@ -84,6 +84,13 @@ Create a `.env` file in the `backend/` directory:
 OPENAI_API_KEY=sk-proj-your-key-here...
 ```
 
+Create a `.env.local` file in the `frontend/` directory:
+
+```env
+NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
+ACCESS_PASSWORD=your-password
+```
+
 ### 4. Run the App
 
 **Terminal 1 (Backend):**
